@@ -1,0 +1,109 @@
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+
+app = FastAPI()
+
+# In-memory store for rooms and users
+rooms = {}
+
+@app.get("/", response_class=HTMLResponse)
+async def get():
+    # Minimal HTML frontend for the lobby
+    return """
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <title>Active Gaming Lobby</title>
+      </head>
+      <body>
+        <h1>Active Gaming Lobby</h1>
+        <input id="roomName" placeholder="Room name"/>
+        <button onclick="createRoom()">Create Room</button>
+        <h3>Rooms</h3>
+        <ul id="roomList"></ul>
+        <div id="chat" style="display:none;">
+          <h2 id="currentRoom"></h2>
+          <div id="messages" style="height:150px;overflow:auto;border:1px solid #ddd;"></div>
+          <input id="msgInput"/>
+          <button onclick="sendMsg()">Send</button>
+        </div>
+        <script>
+        let ws = null;
+        function updateRooms(rooms) {
+          let ul = document.getElementById('roomList');
+          ul.innerHTML = '';
+          rooms.forEach(r => {
+            let li = document.createElement('li');
+            li.innerHTML = r + ' <button onclick="joinRoom(\\'' + r + '\\')">Join</button>';
+            ul.appendChild(li);
+          });
+        }
+        function createRoom() {
+          let name = document.getElementById('roomName').value;
+          ws.send(JSON.stringify({action:'create_room', room:name}));
+        }
+        function joinRoom(room) {
+          ws.send(JSON.stringify({action:'join_room', room:room}));
+        }
+        function sendMsg() {
+          let msg = document.getElementById('msgInput').value;
+          ws.send(JSON.stringify({action:'message', message:msg}));
+          document.getElementById('msgInput').value = '';
+        }
+        function startWS() {
+          ws = new WebSocket('ws://' + location.host + '/ws');
+          ws.onmessage = function(event) {
+            let data = JSON.parse(event.data);
+            if(data.type==='rooms') updateRooms(data.rooms);
+            if(data.type==='joined') {
+              document.getElementById('chat').style.display = '';
+              document.getElementById('currentRoom').innerText = data.room;
+              document.getElementById('messages').innerHTML = '';
+            }
+            if(data.type==='message') {
+              let div = document.createElement('div');
+              div.innerText = data.message;
+              document.getElementById('messages').appendChild(div);
+            }
+          };
+        }
+        startWS();
+        </script>
+      </body>
+    </html>
+    """
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    user_room = None
+
+    # Send list of rooms on connect
+    await websocket.send_json({"type": "rooms", "rooms": list(rooms.keys())})
+
+    try:
+        while True:
+            data = await websocket.receive_json()
+            if data["action"] == "create_room":
+                room = data["room"]
+                if room not in rooms:
+                    rooms[room] = []
+                await websocket.send_json({"type": "rooms", "rooms": list(rooms.keys())})
+            elif data["action"] == "join_room":
+                room = data["room"]
+                if room not in rooms:
+                    rooms[room] = []
+                if user_room and websocket in rooms[user_room]:
+                    rooms[user_room].remove(websocket)
+                rooms[room].append(websocket)
+                user_room = room
+                await websocket.send_json({"type": "joined", "room": room})
+            elif data["action"] == "message" and user_room:
+                msg = data["message"]
+                # Broadcast to all users in the same room
+                for user in rooms[user_room]:
+                    await user.send_json({"type":"message", "message": msg})
+    except WebSocketDisconnect:
+        if user_room and websocket in rooms.get(user_room, []):
+            rooms[user_room].remove(websocket)
